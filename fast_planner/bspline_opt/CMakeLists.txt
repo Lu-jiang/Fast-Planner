@@ -6,11 +6,14 @@ set(CMAKE_CXX_FLAGS "-std=c++11")
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -Wall")
 
+find_package(NLopt REQUIRED)
+set(NLopt_INCLUDE_DIRS ${NLOPT_INCLUDE_DIR})
+
 find_package(Eigen3 REQUIRED)
 find_package(PCL 1.7 REQUIRED)
 
-set(NLOPT_INCLUDE_DIR "/usr/local/include")  
-set(NLOPT_LIBRARY "/usr/local/lib/libnlopt.so")  
+# set(NLOPT_INCLUDE_DIR "/usr/local/include")  
+# set(NLOPT_LIBRARY "/usr/local/lib/libnlopt.so")  
 
 find_package(catkin REQUIRED COMPONENTS
   roscpp

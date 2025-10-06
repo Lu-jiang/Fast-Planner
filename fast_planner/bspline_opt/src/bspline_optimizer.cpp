@@ -110,23 +110,34 @@ void BsplineOptimizer::setWaypoints(const vector<Eigen::Vector3d>& waypts,
   waypt_idx_ = waypt_idx;
 }
 
+
 Eigen::MatrixXd BsplineOptimizer::BsplineOptimizeTraj(const Eigen::MatrixXd& points, const double& ts,
                                                       const int& cost_function, int max_num_id,
                                                       int max_time_id) {
+  //初始化控制点与维度
   setControlPoints(points);
+  //初始化节点向量
   setBsplineInterval(ts);
+  //初始化目代价函数
   setCostFunction(cost_function);
+  //初始化最大控制点与时间id
   setTerminateCond(max_num_id, max_time_id);
-
+  //执行优化
   optimize();
+  //返回优化后的控制点
   return this->control_points_;
 }
 
+ 
+/*优化函数，目标最小化代价输出的控制点*/
 void BsplineOptimizer::optimize() {
   /* initialize solver */
+  //初始化迭代次数和最小代价、设置控制点的数量
   iter_num_        = 0;
   min_cost_        = std::numeric_limits<double>::max();
   const int pt_num = control_points_.rows();
+ 
+//初始化存储代价值向量
   g_q_.resize(pt_num);
   g_smoothness_.resize(pt_num);
   g_distance_.resize(pt_num);
@@ -134,7 +145,8 @@ void BsplineOptimizer::optimize() {
   g_endpoint_.resize(pt_num);
   g_waypoints_.resize(pt_num);
   g_guide_.resize(pt_num);
-
+ 
+//判断是否有终点硬约束
   if (cost_function_ & ENDPOINT) {
     variable_num_ = dim_ * (pt_num - order_);
     // end position used for hard constraint
@@ -144,14 +156,16 @@ void BsplineOptimizer::optimize() {
   } else {
     variable_num_ = max(0, dim_ * (pt_num - 2 * order_)) ;
   }
-
+ 
   /* do optimization using NLopt slover */
+   //创建 NLopt 优化器，选择合适的算法。
   nlopt::opt opt(nlopt::algorithm(isQuadratic() ? algorithm1_ : algorithm2_), variable_num_);
   opt.set_min_objective(BsplineOptimizer::costFunction, this);
+  //设置最大迭代次数、最长运行时间和相对容差。
   opt.set_maxeval(max_iteration_num_[max_num_id_]);
   opt.set_maxtime(max_iteration_time_[max_time_id_]);
   opt.set_xtol_rel(1e-5);
-
+ 
   vector<double> q(variable_num_);
   for (int i = order_; i < pt_num; ++i) {
     if (!(cost_function_ & ENDPOINT) && i >= pt_num - order_) continue;
@@ -159,7 +173,7 @@ void BsplineOptimizer::optimize() {
       q[dim_ * (i - order_) + j] = control_points_(i, j);
     }
   }
-
+ 
   if (dim_ != 1) {
     vector<double> lb(variable_num_), ub(variable_num_);
     const double   bound = 10.0;
@@ -170,46 +184,58 @@ void BsplineOptimizer::optimize() {
     opt.set_lower_bounds(lb);
     opt.set_upper_bounds(ub);
   }
-
+ 
   try {
     // cout << fixed << setprecision(7);
     // vec_time_.clear();
     // vec_cost_.clear();
     // time_start_ = ros::Time::now();
-
+ 
+    //执行优化
     double        final_cost;
     nlopt::result result = opt.optimize(q, final_cost);
-
+ 
     /* retrieve the optimization result */
     // cout << "Min cost:" << min_cost_ << endl;
   } catch (std::exception& e) {
     ROS_WARN("[Optimization]: nlopt exception");
     cout << e.what() << endl;
   }
-
+ 
+ //遍历向量
   for (int i = order_; i < control_points_.rows(); ++i) {
     if (!(cost_function_ & ENDPOINT) && i >= pt_num - order_) continue;
     for (int j = 0; j < dim_; j++) {
       control_points_(i, j) = best_variable_[dim_ * (i - order_) + j];
     }
   }
-
+ 
   if (!(cost_function_ & GUIDE)) ROS_INFO_STREAM("iter num: " << iter_num_);
 }
 
+
+/*计算光滑代价惩罚函数*/
+/*输入：三维点集合（控制点）、更新cost、梯度信息gradient*/
 void BsplineOptimizer::calcSmoothnessCost(const vector<Eigen::Vector3d>& q, double& cost,
                                           vector<Eigen::Vector3d>& gradient) {
+  //初始化代价为0
   cost = 0.0;
+  //初始化一个0向量并且用0向量初始化梯度矩阵
   Eigen::Vector3d zero(0, 0, 0);
   std::fill(gradient.begin(), gradient.end(), zero);
+  //初始化临时变量
   Eigen::Vector3d jerk, temp_j;
-
+//遍历控制点求jerk
   for (int i = 0; i < q.size() - order_; i++) {
     /* evaluate jerk */
+    //采用三阶差分的形式求取jerk
     jerk = q[i + 3] - 3 * q[i + 2] + 3 * q[i + 1] - q[i];
+    //累加所有带价值
     cost += jerk.squaredNorm();
+    //*2是为了调整效果
     temp_j = 2.0 * jerk;
     /* jerk gradient */
+    //由于上述采用的计算形式是差分，所以直接求导就是得到系数，这里设计得很巧妙因为是累加
     gradient[i + 0] += -temp_j;
     gradient[i + 1] += 3.0 * temp_j;
     gradient[i + 2] += -3.0 * temp_j;
@@ -217,21 +243,28 @@ void BsplineOptimizer::calcSmoothnessCost(const vector<Eigen::Vector3d>& q, doub
   }
 }
 
+/*计算障碍物距离代价惩罚函数*/
 void BsplineOptimizer::calcDistanceCost(const vector<Eigen::Vector3d>& q, double& cost,
                                         vector<Eigen::Vector3d>& gradient) {
+ //初始化代价为0
   cost = 0.0;
+ //初始化一个0向量并且用0向量初始化梯度矩阵
   Eigen::Vector3d zero(0, 0, 0);
   std::fill(gradient.begin(), gradient.end(), zero);
-
+ //初始化距离值
   double          dist;
+  //定义变量存储梯度向量
   Eigen::Vector3d dist_grad, g_zero(0, 0, 0);
-
+ //位运算检查是否包含ENDPOINT标志，函数根据是否需要考虑路径的终点来调整计算
+ //如果包含 ENDPOINT，则处理整个路径点向量；如果不包含，就排除掉最后 order_ 个点，可能是为了避免在计算中出现索引越界的问题。
   int end_idx = (cost_function_ & ENDPOINT) ? q.size() : q.size() - order_;
-
+ 
   for (int i = order_; i < end_idx; i++) {
+    //通过调用evaluateEDTWithGrad计算距离dist与距离梯度dist_grad
     edt_environment_->evaluateEDTWithGrad(q[i], -1.0, dist, dist_grad);
+    //果梯度的范数大于阈值，则对梯度进行归一化。
     if (dist_grad.norm() > 1e-4) dist_grad.normalize();
-
+    //当路径点距离环境较近时，代价增加，通过梯度的计算，可以在后续的优化过程中调整路径点，以增加与环境的距离，从而减少代价。
     if (dist < dist0_) {
       cost += pow(dist - dist0_, 2);
       gradient[i] += 2.0 * (dist - dist0_) * dist_grad;
@@ -352,21 +385,23 @@ void BsplineOptimizer::calcGuideCost(const vector<Eigen::Vector3d>& q, double& c
   }
 }
 
+/*优化项结合函数，输入为控制点、引用更新梯度向量、联合函数*/
 void BsplineOptimizer::combineCost(const std::vector<double>& x, std::vector<double>& grad,
                                    double& f_combine) {
   /* convert the NLopt format vector to control points. */
-
+  /*NLopt 格式的向量转换到控制点表示，以支持1D至3D的B样条优化*/
   // This solver can support 1D-3D B-spline optimization, but we use Vector3d to store each control point
   // For 1D case, the second and third elements are zero, and similar for the 2D case.
   for (int i = 0; i < order_; i++) {
     for (int j = 0; j < dim_; ++j) {
       g_q_[i][j] = control_points_(i, j);
     }
+    //如果 dim_ 小于3，则剩余的维度设置为0。这是为了处理1D和2D情况。
     for (int j = dim_; j < 3; ++j) {
       g_q_[i][j] = 0.0;
     }
   }
-
+ //处理由NLopt传入的变量 x，将其转换为控制点并存储在 g_q_ 中。同样，如果 dim_ 小于3，则剩余的维度设置为0，得到矩阵g_q_
   for (int i = 0; i < variable_num_ / dim_; i++) {
     for (int j = 0; j < dim_; ++j) {
       g_q_[i + order_][j] = x[dim_ * i + j];
@@ -375,10 +410,11 @@ void BsplineOptimizer::combineCost(const std::vector<double>& x, std::vector<dou
       g_q_[i + order_][j] = 0.0;
     }
   }
-
+ 
+  //考虑终点，如果 cost_function_ 不包含 ENDPOINT 标志，则将 control_points_ 中的最后 order_ 个控制点复制到 g_q_ 的相应位置
   if (!(cost_function_ & ENDPOINT)) {
     for (int i = 0; i < order_; i++) {
-
+ 
       for (int j = 0; j < dim_; ++j) {
         g_q_[order_ + variable_num_ / dim_ + i][j] =
             control_points_(control_points_.rows() - order_ + i, j);
@@ -388,15 +424,18 @@ void BsplineOptimizer::combineCost(const std::vector<double>& x, std::vector<dou
       }
     }
   }
-
+ 
+ //定义总代价函数
   f_combine = 0.0;
   grad.resize(variable_num_);
   fill(grad.begin(), grad.end(), 0.0);
-
+  if (cost_function_ & SMOOTHNESS) {
+//此处思路真的很清晰，标志位cost_function_设计的很巧妙
   /*  evaluate costs and their gradient  */
+  //每个代价变量
   double f_smoothness, f_distance, f_feasibility, f_endpoint, f_guide, f_waypoints;
   f_smoothness = f_distance = f_feasibility = f_endpoint = f_guide = f_waypoints = 0.0;
-
+ 
   if (cost_function_ & SMOOTHNESS) {
     calcSmoothnessCost(g_q_, f_smoothness, g_smoothness_);
     f_combine += lambda1_ * f_smoothness;
@@ -438,7 +477,7 @@ void BsplineOptimizer::combineCost(const std::vector<double>& x, std::vector<dou
   //   cout << iter_num_ << ", total: " << f_combine << ", acc: " << lambda8_ * f_view
   //        << ", waypt: " << lambda7_ * f_waypoints << endl;
   // }
-
+ 
   // if (optimization_phase_ == SECOND_PHASE) {
   //  << ", smooth: " << lambda1_ * f_smoothness
   //  << " , dist:" << lambda2_ * f_distance
@@ -447,6 +486,7 @@ void BsplineOptimizer::combineCost(const std::vector<double>& x, std::vector<dou
   // << ", guide: " << lambda5_ * f_guide
   // }
 }
+                                   }
 
 double BsplineOptimizer::costFunction(const std::vector<double>& x, std::vector<double>& grad,
                                       void* func_data) {
